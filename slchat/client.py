@@ -1,11 +1,30 @@
 import requests, socketio, asyncio, aiohttp, uuid, time
 import traceback
+import shlex
+import inspect
+import html
 
+from slchat.embed import Embed
 from slchat.context import Context
 from slchat.models import Struct
 
 
 domain = "slchat.alwaysdata.net"
+
+
+def convert_type(value, annotation, param):
+    if annotation is inspect._empty:
+        return value
+
+    if isinstance(value, annotation):
+        return value
+
+    try:
+        if annotation is bool:
+            return value.lower() in ('yes', 'y', 'true', 't', '1', 'enable', 'on')
+        return annotation(value)
+    except Exception:
+        raise ValueError(f"Argument '{param.name}' expected {annotation.__name__}, got '{value}'")
 
 
 class Bot:
@@ -14,16 +33,15 @@ class Bot:
         self.debug = debug
 
         self.token = ""
-        self.bot_id = ""
-        self.servers = []
-        self.dms = []
+        self._servers = {}
+        self._dms = {}
 
         self.sio_instances = {}
         self.user_socket = None
+        self.user = None
         self.session = None
-        self.cache = {}
-        self.user_cache = {}
-        self.pending_temps = {}
+        self._users = {}
+        self._pending_temps = {}
         self.events = {}
         self.commands = {}
         self.waiters = {"message": []}
@@ -31,15 +49,33 @@ class Bot:
         self.send_lock = asyncio.Lock()
         self.last_send_time = 0
 
+    @property
+    def servers(self):
+        return list(self._servers.values())
+
+    @property
+    def dms(self):
+        return list(self._dms.values())
+
     def event(self, func):
         self.events[func.__name__] = func
         return func
 
-    def command(self, *, aliases=[]):
+    def command(self, *, name=None, description="", aliases=None):
+        if aliases is None:
+            aliases = []
         def decorator(func):
-            self.commands[func.__name__] = func
+            command_name = name or func.__name__
+            self.commands[command_name] = {
+                "func": func,
+                "aliases": aliases,
+                "description": description
+            }
             for alias in aliases:
-                self.commands[alias] = func
+                self.commands[alias] = {
+                    "func": func,
+                    "alias_of": command_name
+                }
             return func
         return decorator
 
@@ -47,44 +83,63 @@ class Bot:
         if "on_error" in self.events:
             await self.events["on_error"](exception, context)
 
-    async def run(self, token, bot_id):
+    async def run(self, token: str, bot_id: str):
         self.token = token
-        self.bot_id = bot_id
-
         try:
             self.user_socket = socketio.AsyncClient(logger=self.debug, engineio_logger=self.debug)
-
             @self.user_socket.on('setup', namespace='/user')
             async def on_setup(data):
                 await self.on_socket_user_setup(data)
 
-            await self.user_socket.connect(f"https://{domain}", headers={"Cookie": f"op={self.bot_id}; token={self.token}"}, transports=["websocket"], namespaces=['/user'])
+            @self.user_socket.on('server_add', namespace='/user')
+            async def on_server_add(data):
+                await self.on_server_add(data)
+
+            @self.user_socket.on('dm_add', namespace='/user')
+            async def on_dm_add(data):
+                await self.on_dm_add(data)
+
+            @self.user_socket.on('server_remove', namespace='/user')
+            async def on_server_remove(server_id):
+                await self.on_server_remove(server_id)
+
+            await self.user_socket.connect(f"https://{domain}", headers={"Cookie": f"op={bot_id}; token={self.token}"}, namespaces=['/user'])
         except Exception as e:
             print(traceback.format_exc())
-            await self.run_error(e, f"run - connection failed")
+            await self.run_error(e, f"run - Failed to connect user socket")
+            raise RuntimeError("Failed to connect user socket") from e
 
         self.session = aiohttp.ClientSession()
 
-        await asyncio.create_task(self.cache_wipe_loop())
         await asyncio.Event().wait()
 
     async def on_socket_user_setup(self, data):
-        self.user_cache[self.bot_id] = data["user"]
-        self.servers = data["servers"]
-        self.dms = data["dms"]
-        await asyncio.gather(*(self.connect_to_chat(server["id"], "server") for server in self.servers))
-        await asyncio.gather(*(self.connect_to_chat(dm["id"], "dm") for dm in self.dms))
+        self.user = Struct(**data["user"])
+        self._users[self.user.id] = self.user
 
-        if "on_start" in self.events:
-            await self.events["on_start"]()
+        if "on_connect" in self.events:
+            await self.events["on_connect"]()
 
-    async def connect_to_chat(self, chat_id, chat_type):
+        for server in data["servers"]:
+            server["type"] = "server"
+            self._servers[server["id"]] = Struct(**server)
+            await self.connect_to_chat(server["id"], "server")
+
+        for dm in data["dms"]:
+            dm["type"] = "dm"
+            self._dms[dm["id"]] = Struct(**dm)
+            await self.connect_to_chat(dm["id"], "dm")
+
+        if "on_ready" in self.events:
+            await self.events["on_ready"]()
+
+    async def connect_to_chat(self, chat_id: str, chat_type: str):
         try:
             sio = socketio.AsyncClient(logger=self.debug, engineio_logger=self.debug)
 
             @sio.on('setup', namespace='/chat')
             async def on_socket_chat_setup(data):
-                await self.on_socket_chat_setup(data)
+                await self.on_socket_chat_setup(data, chat_type)
 
             @sio.on('message_receive', namespace='/chat')
             async def on_socket_message_receive(data):
@@ -96,82 +151,203 @@ class Bot:
 
             @sio.on('chat_change', namespace='/chat')
             async def on_socket_chat_change(data):
-                await self.on_socket_chat_change(data, chat_id)
+                await self.on_socket_chat_change(data, chat_id, chat_type)
+
+            @sio.on('user_typing', namespace='/chat')
+            async def on_user_typing(data):
+                await self.on_user_typing(data, chat_id, chat_type)
 
             if chat_type == "server":
                 @sio.on('user_add', namespace='/chat')
-                async def on_socket_server_user_add(data):
-                    await self.on_socket_server_user_add(data)
+                async def on_user_add(data):
+                    await self.on_user_add(data, chat_id)
 
-            await sio.connect(f"https://{domain}/chat?type={chat_type}&id={chat_id}&status=online", headers={"Cookie": f"op={self.bot_id}; token={self.token}"}, namespaces=['/chat'])
+                @sio.on('user_remove', namespace='/chat')
+                async def on_user_remove(user_id):
+                    await self.on_user_remove(user_id, chat_id)
+
+            await sio.connect(f"https://{domain}/chat?type={chat_type}&id={chat_id}&status=online", headers={"Cookie": f"op={self.user.id}; token={self.token}"}, namespaces=['/chat'])
             self.sio_instances[chat_id] = sio
         except Exception as e:
             print(traceback.format_exc())
             await self.run_error(e, f"connect_to_chat - {chat_id}")
+            #raise RuntimeError(f"Failed to connect to chat {chat_id}") from e
 
-    async def on_socket_chat_setup(self, data):
-        for member in data["users"]:
-            self.user_cache[member["id"]] = member
+    async def on_socket_chat_setup(self, data, chat_type: str):
+        data["chat"]["users"] = []
+        for user in data["users"]:
+            member = Struct(**user)
+            data["chat"]["users"].append(member)
+            self._users[member.id] = member
+        data["chat"]["type"] = chat_type
+        chat_data = Struct(**data["chat"])
+        if chat_type == "server":
+            self._servers[chat_data.id] = chat_data
+        else:
+            self._dms[chat_data.id] = chat_data
 
-    async def on_socket_chat_change(self, data, chat_id):
-        self.servers[chat_id] = data
 
-    async def on_socket_server_user_add(self, member):
-        self.user_cache[member["id"]] = member
+    async def on_socket_chat_change(self, data, chat_id: str, chat_type: str):
+        if chat_type == "server":
+            before = self._servers[chat_id]
+            self._servers[chat_id] = data
+            if "on_server_update" in self.events:
+                await self.events["on_server_update"](before, data)
+        else:
+            self._dms[chat_id] = data
 
-    """async def on_socket_server_user_remove(self, member):
-        self.user_cache[member["id"]] = member"""
+    async def on_user_add(self, user, server_id: str):
+        member = Struct(**user)
+        server = self.get_server(server_id)
+        server.users.append(member)
+        self._users[member.id] = member
+        if "on_user_join" in self.events:
+            await self.events["on_user_join"](member, server)
 
-    async def on_socket_message_receive(self, data, chat_id):
+    async def on_user_remove(self, user_id: str, server_id: str):
+        server = self.get_server(server_id)
+        for user in server.users:
+            if user.id == user_id:
+                server.users.remove(user)
+                break
+        if user_id in self._users:
+            member = self._users[user_id]
+            del self._users[user_id]
+            if "on_user_remove" in self.events:
+                await self.events["on_user_remove"](member, server)
+
+    async def on_dm_add(self, data):
+        dm_id = data["id"]
+        data["type"] = "dm"
+        dm = Struct(**data)
+        self._dms[dm_id] = dm
+        self.user.dms.append(dm_id)
+        await self.connect_to_chat(dm_id, "dm")
+        if "on_dm_join" in self.events:
+            await self.events["on_dm_join"](dm)
+
+    async def on_server_add(self, data):
+        server_id = data["id"]
+        data["type"] = "server"
+        server = Struct(**data)
+        self._servers[server_id] = server
+        self.user.servers.append(server_id)
+        await self.connect_to_chat(server_id, "server")
+        if "on_server_join" in self.events:
+            await self.events["on_server_join"](server)
+
+    async def on_server_remove(self, server_id: str):
+        self.user.servers.pop(server_id)
+        if server_id in self.sio_instances:
+            sio = self.sio_instances.pop(server_id)
+            await sio.disconnect()
+        if server_id in self._servers:
+            data = self._servers[server_id]
+            del self._servers[server_id]
+            if "on_server_remove" in self.events:
+                await self.events["on_server_remove"](data)
+
+    async def on_user_typing(self, user_id, chat_id: str, chat_type: str):
+        user = self.get_user(user_id)
+
+        if chat_type == "server":
+            chat = self.get_server(chat_id)
+        else:
+            chat = self.get_dm(chat_id)
+
+        if "on_typing" in self.events:
+            await self.events["on_typing"](chat, user)
+
+    async def on_socket_message_receive(self, data, chat_id: str):
         temp = data.get("temp")
-        if temp and temp in self.pending_temps:
-            future = self.pending_temps.pop(temp)
+        if temp and temp in self._pending_temps:
+            future = self._pending_temps.pop(temp)
             if not future.done():
                 future.set_result(data)
         await self.message_receive(data['message'], chat_id)
 
-    async def on_socket_message_change(self, data, chat_id):
-        if "on_message_edit" in self.events or "on_message_delete" in self.events:
-            if 'owner' in data:
-                data['owner'] = await self.get_user(data['owner'], True)
-                if "bot" in data['owner']['badges']:
-                    return
-            if data["text"]:
-                if "on_message_edit" in self.events:
-                    context = Context(data, chat_id, self)
-                    await self.events["on_message_edit"](context)
-            else:
-                if "on_message_delete" in self.events:
-                    context = Context(data, chat_id, self)
-                    await self.events["on_message_delete"](context)
-
-    async def message_receive(self, message, chat_id):
-        message['owner'] = await self.get_user(message['owner'], True)
-        if "bot" in message['owner']['badges']:
+    async def message_receive(self, message, chat_id: str):
+        message['owner'] = self.get_user(message['owner'])
+        message['text'] = html.unescape(message['text'])
+        if "bot" in message['owner'].badges:
             return
         context = Context(message, chat_id, self)
         self.dispatch("message", context)
         if "on_message" in self.events:
             await self.events["on_message"](context)
         if message['text'].startswith(self.prefix):
-            parts = message['text'][len(self.prefix):].split(" ", 1)
-            command_name = parts[0]
-            argument = parts[1] if len(parts) > 1 else ""
+            await self.process_command(context, message)
 
-            command_func = self.commands.get(command_name)
-            if command_func:
-                try:
-                    if command_func.__code__.co_argcount > 1:
-                        await command_func(context, argument)
-                    else:
-                        await command_func(context)
-                except Exception as e:
-                    await self.run_error(e, f"command: {command_name}")
+    async def process_command(self, ctx, message):
+        raw = message['text'][len(self.prefix):]
+
+        try:
+            parts = shlex.split(raw)
+        except:
+            await self.run_error("Invalid quotes in command", "process_command")
+            return
+
+        if not parts:
+            return
+
+        command_name = parts.pop(0)
+        command_info = self.commands.get(command_name)
+        if not command_info:
+            await self.run_error(f"Unknown command: {command_name}", "process_command")
+            return
+
+        command_func = command_info["func"]
+        command_signature = inspect.signature(command_func)
+        params = list(command_signature.parameters.values())[1:]
+
+        required = sum(1 for p in params if p.default is inspect._empty and p.kind == p.POSITIONAL_OR_KEYWORD)
+
+        if len(parts) < required:
+            await self.run_error(f"Missing arguments for command '{command_name}'", "process_command")
+            return
+
+        final_args = []
+        idx = 0
+
+        for p in params:
+            if p.kind == p.VAR_POSITIONAL:
+                for raw_arg in parts[idx:]:
+                    final_args.append(convert_type(raw_arg, p.annotation, p))
+                break
+            if idx < len(parts):
+                raw_arg = parts[idx]
+                idx += 1
             else:
-                error_msg = f"Unknown command: {command_name}"
-                await self.run_error(error_msg, "message_receive")
+                raw_arg = p.default
+            final_args.append(convert_type(raw_arg, p.annotation, p))
+        try:
+            await command_func(ctx, *final_args)
+        except Exception as e:
+            await self.run_error(e, f"Command: {command_name}")
 
-    async def send(self, text, chat_id):
+    async def on_socket_message_change(self, data, chat_id: str):
+        if "on_message_edit" in self.events or "on_message_delete" in self.events:
+            if 'owner' in data:
+                data['owner'] = self.get_user(data['owner'])
+                if "bot" in data['owner'].badges:
+                    return
+
+            if data["text"]:
+                data['text'] = html.unescape(data['text'])
+                if data["before"]:
+                    data['before'] = html.unescape(data['before'])
+                if "on_message_edit" in self.events:
+                    context = Context(data, chat_id, self)
+                    await self.events["on_message_edit"](context)
+            elif "on_message_delete" in self.events:
+                if data["before"]:
+                    data['before'] = html.unescape(data['before'])
+                context = Context(data, chat_id, self)
+                await self.events["on_message_delete"](context)
+
+
+    async def send(self, text, chat_id: str, embed: Embed = None):
+        text = str(text)
         async with self.send_lock:
             now = time.monotonic()
             elapsed = now - self.last_send_time
@@ -185,7 +361,15 @@ class Bot:
             try:
                 temp_id = str(uuid.uuid4())
                 future = asyncio.get_running_loop().create_future()
-                self.pending_temps[temp_id] = future
+                self._pending_temps[temp_id] = future
+
+                parts = []
+                if text:
+                    parts.append(text)
+                if embed:
+                    parts.append(embed.build())
+                text = "\n".join(parts)
+
                 await self.sio_instances[chat_id].emit('message_send', {"text": text, "temp": temp_id}, namespace='/chat')
                 try:
                     message_data = await asyncio.wait_for(future, timeout=5)
@@ -197,16 +381,22 @@ class Bot:
             except Exception as e:
                 await self.run_error(e, "send")
 
-    async def edit(self, text, message_id, chat_id):
+    async def edit(self, text, message_id: str, chat_id: str, embed = None):
         if chat_id not in self.sio_instances:
             await self.run_error(f"Bot is not in server [{chat_id}]", "edit")
             return
         try:
+            parts = []
+            if text:
+                parts.append(str(text))
+            if embed:
+                parts.append(embed.build())
+            text = "\n".join(parts)
             await self.sio_instances[chat_id].emit('message_edit', {"id": message_id, "action": "edit", "text": text}, namespace='/chat')
         except Exception as e:
             await self.run_error(e, "edit")
 
-    async def delete(self, message_id, chat_id):
+    async def delete(self, message_id: str, chat_id):
         if chat_id not in self.sio_instances:
             await self.run_error(f"Bot is not in server [{chat_id}]", "delete")
             return
@@ -238,7 +428,7 @@ class Bot:
             self.waiters[event].remove((check, future))
             raise
 
-    async def change(self, key, value):
+    async def change(self, key: str, value: str):
         try:
             response = requests.post(
                 f"https://{domain}/api/change",
@@ -251,40 +441,17 @@ class Bot:
         except Exception as e:
             await self.run_error(e, "change")
 
-    async def cache_wipe_loop(self):
-        while True:
-            await asyncio.sleep(7200)
-            self.cache.clear()
-
-    async def get_json_cache(self, url):
-        if url.startswith(f"https://{domain}/api/user/"):
-            user_id = url.replace(f"https://{domain}/api/user/", "").replace("/", "")
-            if user_id not in self.user_cache:
-                async with self.session.get(url, cookies={"token": self.token, "op": self.bot_id}) as response:
-                    response.raise_for_status()
-                    self.user_cache[user_id] = await response.json()
-            return self.user_cache[user_id]
-        elif url not in self.cache:
-            async with self.session.get(url, cookies={"token": self.token, "op": self.bot_id}) as response:
-                response.raise_for_status()
-                self.cache[url] = await response.json()
-        return self.cache[url]
-
-    async def get_user(self, id, is_json=False):
-        try:
-            json = await self.get_json_cache(f"https://{domain}/api/user/{id}/")
-            return json if is_json else Struct(**json)
-        except:
-            return None
-
-    async def get_user_by_username(self, username, is_json=False):
-        for user in self.user_cache.values():
-            if user["username"] == username:
-                return user if is_json else Struct(**user)
+    def get_user(self, user_id: str):
+        if user_id in self._users:
+            return self._users[user_id]
         return None
 
-    async def get_server(self, id):
-        try:
-            return Struct(**await self.get_json_cache(f"https://{domain}/api/server/{id}/"))
-        except:
-            return None
+    def get_server(self, server_id: str):
+        if server_id in self._servers:
+            return self._servers[server_id]
+        return None
+
+    def get_dm(self, dm_id: str):
+        if dm_id in self._dms:
+            return self._dms[dm_id]
+        return None

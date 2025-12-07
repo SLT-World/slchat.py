@@ -65,22 +65,27 @@ class Embed:
         return self
 
     def build(self):
-        fields = ""
-        for field in self.fields:
-            fields += f"""\n- name: {field["name"]}
-  value: {field["value"]}
-  inline: {field["inline"]}"""
-        fields.strip()
-
-        return (f"""|embed
-type: {self.embed_type}
-{f"icon: {self.icon}" if self.icon else ""}
-{f"title: {self.title}" if self.title else ""}
-{f"description: \"{self.description}\"" if self.description else ""}
-{f"color: {self.color}" if self.color else ""}
-{f"image: {f"||{self.attachment}||" if self.attachment_spoiler else self.attachment}" if self.attachment else ""}
-{f"avatar: {self.avatar}" if self.avatar else ""}
-{f"footer: {self.footer}" if self.footer else ""}
-{f"fields:" if self.fields else ""}
-{fields}
-|end""")
+        parts = [f"|embed", f"type: {self.embed_type}"]
+        if self.icon:
+            parts.append(f"icon: {self.icon}")
+        if self.title:
+            parts.append(f"title: {self.title}")
+        if self.description:
+            parts.append(f"""description: \"{self.description}\"""")
+        if self.color:
+            parts.append(f"color: {self.color}")
+        if self.attachment:
+            attachment = f"||{self.attachment}||" if self.attachment_spoiler else self.attachment
+            parts.append(f"image: {attachment}")
+        if self.avatar:
+            parts.append(f"avatar: {self.avatar}")
+        if self.footer:
+            parts.append(f"footer: {self.footer}")
+        if self.fields:
+            parts.append("fields:")
+            for field in self.fields:
+                parts.append(f"- name: {field["name"]}")
+                parts.append(f"  value: {field["value"]}")
+                parts.append(f"  inline: {field["inline"]}")
+        parts.append("|end")
+        return "\n".join(parts)
