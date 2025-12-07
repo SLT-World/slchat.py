@@ -1,0 +1,15 @@
+[project]
+name = "slchat.py"
+version = "0.2.8"
+description = "A python API wrapper for SLChat."
+requires-python = ">=3.8"
+authors = [{name="SLT World"}]
+license = { file = "LICENSE" }
+
+[project.urls]
+Homepage = "https://github.com/SLT-World/slchat.py"
+"Issue Tracker" = "https://github.com/SLT-World/slchat.py/issues"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
