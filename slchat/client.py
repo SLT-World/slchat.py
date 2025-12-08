@@ -95,13 +95,17 @@ class Bot:
             async def on_server_add(data):
                 await self.on_server_add(data)
 
+            @self.user_socket.on('server_remove', namespace='/user')
+            async def on_server_remove(server_id):
+                await self.on_server_remove(server_id)
+
             @self.user_socket.on('dm_add', namespace='/user')
             async def on_dm_add(data):
                 await self.on_dm_add(data)
 
-            @self.user_socket.on('server_remove', namespace='/user')
-            async def on_server_remove(server_id):
-                await self.on_server_remove(server_id)
+            @self.user_socket.on('dm_remove', namespace='/user')
+            async def on_dm_remove(dm_id):
+                await self.on_dm_remove(dm_id)
 
             await self.user_socket.connect(f"https://{domain}", headers={"Cookie": f"op={bot_id}; token={self.token}"}, namespaces=['/user'])
         except Exception as e:
@@ -226,6 +230,18 @@ class Bot:
         if "on_dm_join" in self.events:
             await self.events["on_dm_join"](dm)
 
+    async def on_dm_remove(self, dm_id: str):
+        if dm_id in self.user.dms:
+            self.user.dms.remove(dm_id)
+        if dm_id in self.sio_instances:
+            sio = self.sio_instances.pop(dm_id)
+            await sio.disconnect()
+        if dm_id in self._dms:
+            data = self._dms[dm_id]
+            del self._dms[dm_id]
+            if "on_dm_remove" in self.events:
+                await self.events["on_dm_remove"](data)
+
     async def on_server_add(self, data):
         server_id = data["id"]
         data["type"] = "server"
@@ -237,7 +253,8 @@ class Bot:
             await self.events["on_server_join"](server)
 
     async def on_server_remove(self, server_id: str):
-        self.user.servers.pop(server_id)
+        if server_id in self.user.servers:
+            self.user.servers.remove(server_id)
         if server_id in self.sio_instances:
             sio = self.sio_instances.pop(server_id)
             await sio.disconnect()
