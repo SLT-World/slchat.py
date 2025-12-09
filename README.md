@@ -2,7 +2,7 @@
 
 **slchat.py** is a python API wrapper for SLChat.
 
-## Short Example
+## Quick Start
 ```py
 import slchat
 import asyncio
@@ -17,7 +17,7 @@ asyncio.run(client.run("token", "bot_id"))
 ```
 
 ## Events
-Events are registered using the `@client.event` decorator.
+Events are registered using the `@client.event` decorator, for example:
 ```py
 @client.event
 async def on_ready():
@@ -86,7 +86,7 @@ on_user_remove(user, server)
 ```
 Called when a user leaves a server.
 
-### Others
+### Miscellaneous
 ```
 on_typing(chat, user)
 ```
