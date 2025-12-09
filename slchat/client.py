@@ -15,13 +15,17 @@ domain = "slchat.alwaysdata.net"
 def convert_type(value, annotation, param):
     if annotation is inspect._empty:
         return value
-
     if isinstance(value, annotation):
         return value
-
     try:
         if annotation is bool:
-            return value.lower() in ('yes', 'y', 'true', 't', '1', 'enable', 'on')
+            lowered = value.strip().lower()
+            if lowered in ('yes', 'y', 'true', 't', '1', 'enable', 'on'):
+                return True
+            elif lowered in ('no', 'n', 'false', 'f', '0', 'disable', 'off'):
+                return False
+            else:
+                raise ValueError()
         return annotation(value)
     except Exception:
         raise ValueError(f"Argument '{param.name}' expected {annotation.__name__}, got '{value}'")
