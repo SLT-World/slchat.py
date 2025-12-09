@@ -1,6 +1,6 @@
 # slchat.py
 
-**slchat.py** is a python API wrapper for SLChat.
+**slchat.py** is an API wrapper for SLChat, written in python.
 
 ## Quick Start
 ```py

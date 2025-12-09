@@ -5,7 +5,7 @@ import inspect
 import html
 
 from slchat.embed import Embed
-from slchat.context import Context
+from slchat.classes import Context, Group, Command
 from slchat.models import Struct
 
 
@@ -57,25 +57,32 @@ class Bot:
     def dms(self):
         return list(self._dms.values())
 
+    @property
+    def users(self):
+        return list(self._users.values())
+
     def event(self, func):
         self.events[func.__name__] = func
         return func
 
+    def group(self, *, name=None, description="", aliases=None, invoke_without_command=False):
+        def decorator(func):
+            group_name = name or func.__name__
+            group = Group(group_name, func, description, aliases, None, invoke_without_command)
+            self.commands[group_name] = group
+            if aliases:
+                for alias in aliases:
+                    self.commands[alias] = Group(alias, func, description, None, group_name, invoke_without_command)
+            return group
+        return decorator
+
     def command(self, *, name=None, description="", aliases=None):
-        if aliases is None:
-            aliases = []
         def decorator(func):
             command_name = name or func.__name__
-            self.commands[command_name] = {
-                "func": func,
-                "aliases": aliases,
-                "description": description
-            }
-            for alias in aliases:
-                self.commands[alias] = {
-                    "func": func,
-                    "alias_of": command_name
-                }
+            self.commands[command_name] = Command(command_name, func, description, aliases)
+            if aliases:
+                for alias in aliases:
+                    self.commands[alias] = Command(alias, func, description, None, command_name)
             return func
         return decorator
 
@@ -190,7 +197,6 @@ class Bot:
         else:
             self._dms[chat_data.id] = chat_data
 
-
     async def on_socket_chat_change(self, data, chat_id: str, chat_type: str):
         if chat_type == "server":
             before = self._servers[chat_id]
@@ -202,14 +208,14 @@ class Bot:
 
     async def on_user_add(self, user, server_id: str):
         member = Struct(**user)
-        server = self.get_server(server_id)
+        server = self.fetch_server(server_id)
         server.users.append(member)
         self._users[member.id] = member
         if "on_user_join" in self.events:
             await self.events["on_user_join"](member, server)
 
     async def on_user_remove(self, user_id: str, server_id: str):
-        server = self.get_server(server_id)
+        server = self.fetch_server(server_id)
         for user in server.users:
             if user.id == user_id:
                 server.users.remove(user)
@@ -265,12 +271,12 @@ class Bot:
                 await self.events["on_server_remove"](data)
 
     async def on_user_typing(self, user_id, chat_id: str, chat_type: str):
-        user = self.get_user(user_id)
+        user = self.fetch_user(user_id)
 
         if chat_type == "server":
-            chat = self.get_server(chat_id)
+            chat = self.fetch_server(chat_id)
         else:
-            chat = self.get_dm(chat_id)
+            chat = self.fetch_dm(chat_id)
 
         if "on_typing" in self.events:
             await self.events["on_typing"](chat, user)
@@ -284,7 +290,7 @@ class Bot:
         await self.message_receive(data['message'], chat_id)
 
     async def message_receive(self, message, chat_id: str):
-        message['owner'] = self.get_user(message['owner'])
+        message['owner'] = self.fetch_user(message['owner'])
         message['text'] = html.unescape(message['text'])
         if "bot" in message['owner'].badges:
             return
@@ -295,7 +301,7 @@ class Bot:
         if message['text'].startswith(self.prefix):
             await self.process_command(context, message)
 
-    async def process_command(self, ctx, message):
+    async def process_command(self, ctx: Context, message):
         raw = message['text'][len(self.prefix):]
 
         try:
@@ -313,39 +319,76 @@ class Bot:
             await self.run_error(f"Unknown command: {command_name}", "process_command")
             return
 
-        command_func = command_info["func"]
+        parent_command = command_info
+        invoked_subcommands = []
+
+        while isinstance(parent_command, Group):
+            if parts and parts[0] in parent_command.subcommands:
+                subcommand_name = parts.pop(0)
+                invoked_subcommands.append(subcommand_name)
+                parent_command = parent_command.subcommands[subcommand_name]
+            else:
+                break
+
+        ctx.invoked_subcommands = invoked_subcommands
+        ctx.invoked_with = command_name
+
+        if isinstance(parent_command, Group):
+            if parent_command.invoke_without_command:
+                command_func = parent_command.func
+            else:
+                return await self.run_error(f"Unknown subcommand for group '{parent_command.name}'", "process_command")
+        else:
+            command_func = parent_command.func
+
         command_signature = inspect.signature(command_func)
         params = list(command_signature.parameters.values())[1:]
 
-        required = sum(1 for p in params if p.default is inspect._empty and p.kind == p.POSITIONAL_OR_KEYWORD)
+        required = sum(1 for p in params if p.default is inspect._empty and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD))
 
         if len(parts) < required:
             await self.run_error(f"Missing arguments for command '{command_name}'", "process_command")
             return
 
         final_args = []
+        final_kwargs = {}
         idx = 0
+        remaining_text = " ".join(parts)
 
         for p in params:
             if p.kind == p.VAR_POSITIONAL:
-                for raw_arg in parts[idx:]:
-                    final_args.append(convert_type(raw_arg, p.annotation, p))
+                final_args.extend(convert_type(raw_arg, p.annotation, p) for raw_arg in parts[idx:])
                 break
-            if idx < len(parts):
-                raw_arg = parts[idx]
-                idx += 1
-            else:
-                raw_arg = p.default
-            final_args.append(convert_type(raw_arg, p.annotation, p))
+            elif p.kind == p.POSITIONAL_ONLY or p.kind == p.POSITIONAL_OR_KEYWORD:
+                if idx < len(parts):
+                    raw_arg = parts[idx]
+                    idx += 1
+                else:
+                    raw_arg = p.default
+                final_args.append(convert_type(raw_arg, p.annotation, p))
+            elif p.kind == p.KEYWORD_ONLY:
+                match = next((part for part in parts[idx:] if part.startswith(f"{p.name}=")), None)
+                if match:
+                    raw_value = match.split("=", 1)[1]
+                    final_kwargs[p.name] = convert_type(raw_value, p.annotation, p)
+                    parts.remove(match)
+                else:
+                    if remaining_text:
+                        final_kwargs[p.name] = convert_type(remaining_text, p.annotation, p)
+                        remaining_text = ""
+                    elif p.default is not inspect._empty:
+                        final_kwargs[p.name] = p.default
+                    else:
+                        return await self.run_error(f"Missing required keyword-only argument '{p.name}'", "process_command")
         try:
-            await command_func(ctx, *final_args)
+            await command_func(ctx, *final_args, **final_kwargs)
         except Exception as e:
             await self.run_error(e, f"Command: {command_name}")
 
     async def on_socket_message_change(self, data, chat_id: str):
         if "on_message_edit" in self.events or "on_message_delete" in self.events:
             if 'owner' in data:
-                data['owner'] = self.get_user(data['owner'])
+                data['owner'] = self.fetch_user(data['owner'])
                 if "bot" in data['owner'].badges:
                     return
 
@@ -458,17 +501,17 @@ class Bot:
         except Exception as e:
             await self.run_error(e, "change")
 
-    def get_user(self, user_id: str):
+    def fetch_user(self, user_id: str):
         if user_id in self._users:
             return self._users[user_id]
         return None
 
-    def get_server(self, server_id: str):
+    def fetch_server(self, server_id: str):
         if server_id in self._servers:
             return self._servers[server_id]
         return None
 
-    def get_dm(self, dm_id: str):
+    def fetch_dm(self, dm_id: str):
         if dm_id in self._dms:
             return self._dms[dm_id]
         return None
