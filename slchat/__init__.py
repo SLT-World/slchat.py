@@ -1,3 +1,2 @@
-from slchat.client import Bot
-from slchat.classes import Context, TypingIndicator
-from slchat.embed import Embed
+from slchat.client import *
+from slchat.classes import *

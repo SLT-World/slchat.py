@@ -4,8 +4,7 @@ import shlex
 import inspect
 import html
 
-from slchat.embed import Embed
-from slchat.classes import Context, Group, Command
+from slchat.classes import Context, Group, Command, Embed
 from slchat.models import Struct
 
 
