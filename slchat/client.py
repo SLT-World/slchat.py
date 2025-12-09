@@ -120,7 +120,7 @@ class Bot:
             await self.user_socket.connect(f"https://{domain}", headers={"Cookie": f"op={bot_id}; token={self.token}"}, namespaces=['/user'])
         except Exception as e:
             print(traceback.format_exc())
-            await self.run_error(e, f"run - Failed to connect user socket")
+            await self.run_error(e, f"run")
             raise RuntimeError("Failed to connect user socket") from e
 
         self.session = aiohttp.ClientSession()
@@ -340,7 +340,7 @@ class Bot:
             if parent_command.invoke_without_command:
                 command_func = parent_command.func
             else:
-                return await self.run_error(f"Unknown subcommand for group '{parent_command.name}'", "process_command")
+                return await self.run_error(f"Unknown subcommand for group: {parent_command.name}", "process_command")
         else:
             command_func = parent_command.func
 
@@ -350,7 +350,7 @@ class Bot:
         required = sum(1 for p in params if p.default is inspect._empty and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD))
 
         if len(parts) < required:
-            await self.run_error(f"Missing arguments for command '{command_name}'", "process_command")
+            await self.run_error(f"Missing arguments for command: {command_name}", "process_command")
             return
 
         final_args = []
@@ -382,7 +382,7 @@ class Bot:
                     elif p.default is not inspect._empty:
                         final_kwargs[p.name] = p.default
                     else:
-                        return await self.run_error(f"Missing required keyword-only argument '{p.name}'", "process_command")
+                        return await self.run_error(f"Missing required keyword-only argument for command: {p.name}", "process_command")
         try:
             await command_func(ctx, *final_args, **final_kwargs)
         except Exception as e:
@@ -419,7 +419,7 @@ class Bot:
                 await asyncio.sleep(delay)
             self.last_send_time = time.monotonic()
             if chat_id not in self.sio_instances:
-                await self.run_error(f"Bot is not in chat [{chat_id}]", "send")
+                await self.run_error(f"Invalid chat: {chat_id}", "send")
                 return
             try:
                 temp_id = str(uuid.uuid4())
@@ -444,9 +444,9 @@ class Bot:
             except Exception as e:
                 await self.run_error(e, "send")
 
-    async def edit(self, text, message_id: str, chat_id: str, embed = None):
+    async def edit(self, text, message_id: str, chat_id: str, embed: Embed = None):
         if chat_id not in self.sio_instances:
-            await self.run_error(f"Bot is not in server [{chat_id}]", "edit")
+            await self.run_error(f"Invalid chat: {chat_id}", "edit")
             return
         try:
             parts = []
@@ -459,9 +459,9 @@ class Bot:
         except Exception as e:
             await self.run_error(e, "edit")
 
-    async def delete(self, message_id: str, chat_id):
+    async def delete(self, message_id: str, chat_id: str):
         if chat_id not in self.sio_instances:
-            await self.run_error(f"Bot is not in server [{chat_id}]", "delete")
+            await self.run_error(f"Invalid chat: {chat_id}", "delete")
             return
         try:
             await self.sio_instances[chat_id].emit('message_edit', {"id": message_id, "action": "delete"}, namespace='/chat')
@@ -497,7 +497,7 @@ class Bot:
                 f"https://{domain}/api/change",
                 data={"key": key, "value": value},
                 headers={'Content-Type': 'application/x-www-form-urlencoded'},
-                cookies={"token": self.token, "op": self.bot_id}
+                cookies={"token": self.token, "op": self.user.id}
             )
             response.raise_for_status()
             print(f"Changed [{key}] into [{value}]")
