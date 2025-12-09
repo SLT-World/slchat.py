@@ -9,15 +9,15 @@ EMBED_ICONS = {
 }
 
 class Embed:
-    def __init__(self, embed_type="default", title="", description="", color=""):
+    def __init__(self, embed_type="default", title=None, description=None, color=None):
         self.embed_type = embed_type
         self.title = title
         self.color = color
-        self.icon = ""
+        self.icon = None
         self.description = description
-        self.attachment = ""
-        self.footer = ""
-        self.avatar = ""
+        self.attachment = None
+        self.footer = None
+        self.avatar = None
         self.fields = []
         self.attachment_spoiler = False
 
