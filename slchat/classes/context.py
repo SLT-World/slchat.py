@@ -9,7 +9,7 @@ class Context:
         self.date = message['date'] if "before" in message else None
         self.id = message['id']
         self.bot = bot
-        self.chat = self.bot.fetch_server(chat_id) or self.bot.fetch_dm(chat_id)
+        self.chat = self.bot.get_server(chat_id) or self.bot.get_dm(chat_id)
         self.invoked_subcommands = []
         self.invoked_with = None
 

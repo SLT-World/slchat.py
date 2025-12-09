@@ -211,14 +211,14 @@ class Bot:
 
     async def on_user_add(self, user, server_id: str):
         member = Struct(**user)
-        server = self.fetch_server(server_id)
+        server = self.get_server(server_id)
         server.users.append(member)
         self._users[member.id] = member
         if "on_user_join" in self.events:
             await self.events["on_user_join"](member, server)
 
     async def on_user_remove(self, user_id: str, server_id: str):
-        server = self.fetch_server(server_id)
+        server = self.get_server(server_id)
         for user in server.users:
             if user.id == user_id:
                 server.users.remove(user)
@@ -274,12 +274,12 @@ class Bot:
                 await self.events["on_server_remove"](data)
 
     async def on_user_typing(self, user_id, chat_id: str, chat_type: str):
-        user = self.fetch_user(user_id)
+        user = self.get_user(user_id)
 
         if chat_type == "server":
-            chat = self.fetch_server(chat_id)
+            chat = self.get_server(chat_id)
         else:
-            chat = self.fetch_dm(chat_id)
+            chat = self.get_dm(chat_id)
 
         if "on_typing" in self.events:
             await self.events["on_typing"](chat, user)
@@ -293,7 +293,7 @@ class Bot:
         await self.message_receive(data['message'], chat_id)
 
     async def message_receive(self, message, chat_id: str):
-        message['owner'] = self.fetch_user(message['owner'])
+        message['owner'] = self.get_user(message['owner'])
         message['text'] = html.unescape(message['text'])
         if "bot" in message['owner'].badges:
             return
@@ -391,7 +391,7 @@ class Bot:
     async def on_socket_message_change(self, data, chat_id: str):
         if "on_message_edit" in self.events or "on_message_delete" in self.events:
             if 'owner' in data:
-                data['owner'] = self.fetch_user(data['owner'])
+                data['owner'] = self.get_user(data['owner'])
                 if "bot" in data['owner'].badges:
                     return
 
@@ -504,17 +504,49 @@ class Bot:
         except Exception as e:
             await self.run_error(e, "change")
 
-    def fetch_user(self, user_id: str):
+    def get_user(self, user_id: str):
         if user_id in self._users:
             return self._users[user_id]
         return None
 
-    def fetch_server(self, server_id: str):
+    def get_server(self, server_id: str):
         if server_id in self._servers:
             return self._servers[server_id]
         return None
 
-    def fetch_dm(self, dm_id: str):
+    def get_dm(self, dm_id: str):
         if dm_id in self._dms:
             return self._dms[dm_id]
         return None
+
+    async def fetch_user(self, user_id):
+        user = self.get_user(user_id)
+        if user:
+            return user
+        else:
+            try:
+                async with self.session.get(f"https://{domain}/api/user/{user_id}", cookies={"token": self.token, "op": self.user.id}) as response:
+                    response.raise_for_status()
+                    json = await response.json()
+                    user = Struct(**json)
+                    self._users[user_id] = user
+                    return user
+            except Exception:
+                return None
+
+    async def fetch_server(self, server_id):
+        server = self.get_server(server_id)
+        if server:
+            return server
+        else:
+            try:
+                async with self.session.get(f"https://{domain}/api/server/{server_id}", cookies={"token": self.token, "op": self.user.id}) as response:
+                    response.raise_for_status()
+                    json = await response.json()
+                    json["type"] = "server"
+                    json["id"] = server_id
+                    server = Struct(**json)
+                    self._servers[server_id] = server
+                    return server
+            except Exception:
+                return None
