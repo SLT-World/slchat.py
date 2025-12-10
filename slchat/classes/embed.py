@@ -54,13 +54,11 @@ class Embed:
         self.avatar = url
         return self
 
-    def add_field(self, name, value, inline=False, color=None, icon=None):
+    def add_field(self, name, value, inline=False):
         self.fields.append({
             "name": name,
             "value": value,
-            "inline": inline,
-            "color": color,
-            "icon": icon,
+            "inline": inline
         })
         return self
 
