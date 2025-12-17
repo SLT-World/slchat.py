@@ -8,6 +8,7 @@ EMBED_ICONS = {
     "default": None
 }
 
+
 class Embed:
     def __init__(self, embed_type="default", title=None, description=None, color=None):
         self.embed_type = embed_type

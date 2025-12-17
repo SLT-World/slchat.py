@@ -97,6 +97,7 @@ class Bot:
         self.token = token
         try:
             self.user_socket = socketio.AsyncClient(logger=self.debug, engineio_logger=self.debug)
+
             @self.user_socket.on('setup', namespace='/user')
             async def on_setup(data):
                 await self.on_socket_user_setup(data)
@@ -407,7 +408,6 @@ class Bot:
                     data['before'] = html.unescape(data['before'])
                 context = Context(data, chat_id, self)
                 await self.events["on_message_delete"](context)
-
 
     async def send(self, text, chat_id: str, embed: Embed = None):
         text = str(text)
