@@ -118,7 +118,7 @@ class Bot:
             async def on_dm_remove(dm_id):
                 await self.on_dm_remove(dm_id)
 
-            await self.user_socket.connect(f"https://{domain}", headers={"Cookie": f"op={bot_id}; token={self.token}"}, namespaces=['/user'])
+            await self.user_socket.connect(f"https://{domain}", headers={"Cookie": f"op={bot_id}; token={self.token}"}, namespaces=['/user'], transports=['websocket'])
         except Exception as e:
             print(traceback.format_exc())
             await self.run_error(e, f"run")
@@ -181,7 +181,7 @@ class Bot:
                 async def on_user_remove(user_id):
                     await self.on_user_remove(user_id, chat_id)
 
-            await sio.connect(f"https://{domain}/chat?type={chat_type}&id={chat_id}&status=online", headers={"Cookie": f"op={self.user.id}; token={self.token}"}, namespaces=['/chat'])
+            await sio.connect(f"https://{domain}/chat?type={chat_type}&id={chat_id}&status=online", headers={"Cookie": f"op={self.user.id}; token={self.token}"}, namespaces=['/chat'], transports=['websocket'])
             self.sio_instances[chat_id] = sio
         except Exception as e:
             print(traceback.format_exc())
